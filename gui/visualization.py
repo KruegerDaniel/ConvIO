@@ -125,28 +125,52 @@ class VisualizationMixin:
     def _visualize_redundant_bus(self, view: pg.PlotWidget, clustering_results: Dict[str, Any]):
         if not clustering_results or not self.current_graph:
             return
+
         renderer.reset_view(view)
         pos = self._get_node_positions(self.current_graph)
-        renderer.draw_bus_topology(view, clustering_results, pos)
+        can_path = clustering_results.get("can_bus", {}).get("path", [])
 
-        # Redundant return path is precomputed in
-        # main_window.run_communication_network and cached on the host as
-        # ``redundant_return``. Drawn for strict disjoint paths and shared-route
-        # fallback paths.
         return_info = getattr(self, "redundant_return", None)
-        if return_info and return_info.get("status") in {"ok", "shared_route_fallback"} and return_info.get("path"):
-            legend_label = (
-                "Redundant Return (edge-disjoint)"
-                if return_info.get("status") == "ok"
-                else "Redundant Return (shared route)"
-            )
-            renderer.draw_path(view, return_info["path"], pos,
-                               renderer.REDUNDANT_PEN,
-                               legend_label=legend_label)
 
-        renderer.draw_cluster_layer(view, clustering_results.get("clusters", {}), pos,
-                                     self._get_cluster_colors())
-        renderer.draw_base_graph(view, self.current_graph, pos, self.config.config, node_alpha=1.0)
+        if return_info and return_info.get("path"):
+            redundant_path = return_info["path"]
+        else:
+            redundant_path = can_path
+
+        if can_path and len(can_path) > 1:
+            can_pos = self._offset_path_positions(can_path, pos, offset=-6.0)
+            renderer.draw_path(
+                view,
+                can_path,
+                can_pos,
+                renderer.BUS_PEN,
+                legend_label="Bus Path CAN FD",
+            )
+
+        if redundant_path and len(redundant_path) > 1:
+            redundant_pos = self._offset_path_positions(redundant_path, pos, offset=6.0)
+            renderer.draw_path(
+                view,
+                redundant_path,
+                redundant_pos,
+                renderer.REDUNDANT_PEN,
+                legend_label="Redundant Bus Path",
+            )
+
+        renderer.draw_cluster_layer(
+            view,
+            clustering_results.get("clusters", {}),
+            pos,
+            self._get_cluster_colors(),
+        )
+
+        renderer.draw_base_graph(
+            view,
+            self.current_graph,
+            pos,
+            self.config.config,
+            node_alpha=1.0,
+        )
         renderer.set_view_limits(view, pos)
 
     # ==================================================================
@@ -208,6 +232,65 @@ class VisualizationMixin:
             (128,177,211),(253,180,98),(179,222,105),(252,205,229),
         ]]
 
+    def _offset_path_positions(
+            self,
+            path,
+            pos: Dict[str, Tuple[float, float]],
+            offset: float = 6.0,
+    ) -> Dict[str, Tuple[float, float]]:
+        """
+        Return a copy of pos where only nodes in `path` are shifted sideways.
+
+        offset is in plot/data units. If your chassis coordinates are in mm,
+        offset=6.0 means 6 mm visual separation.
+        """
+        shifted = dict(pos)
+
+        if not path or len(path) < 2:
+            return shifted
+
+        def normal(a, b):
+            ax, ay = pos[a]
+            bx, by = pos[b]
+            dx, dy = bx - ax, by - ay
+            length = (dx * dx + dy * dy) ** 0.5
+
+            if length == 0:
+                return 0.0, 0.0
+
+            # Perpendicular unit vector.
+            return -dy / length, dx / length
+
+        for i, node in enumerate(path):
+            if node not in pos:
+                continue
+
+            normals = []
+
+            if i > 0 and path[i - 1] in pos:
+                normals.append(normal(path[i - 1], node))
+
+            if i < len(path) - 1 and path[i + 1] in pos:
+                normals.append(normal(node, path[i + 1]))
+
+            if not normals:
+                continue
+
+            nx = sum(n[0] for n in normals) / len(normals)
+            ny = sum(n[1] for n in normals) / len(normals)
+
+            norm_len = (nx * nx + ny * ny) ** 0.5
+            if norm_len == 0:
+                continue
+
+            nx /= norm_len
+            ny /= norm_len
+
+            x, y = pos[node]
+            shifted[node] = (x + offset * nx, y + offset * ny)
+
+        return shifted
+
     # ==================================================================
     # Off-screen PNG export for PDF report generator
     # ==================================================================
@@ -224,3 +307,4 @@ class VisualizationMixin:
         pixmap.save(buf, "PNG")
         buf.seek(0)
         return buf.readAll().data()
+
